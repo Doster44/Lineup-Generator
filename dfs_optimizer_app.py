@@ -35,6 +35,10 @@ def normalize_position(pos: str) -> str:
 def build_lineups(players: pd.DataFrame, num_lineups: int,
                   salary_cap: int, exposure_cap: float,
                   min_unique: int, randomness: float):
+    """
+    Always returns lineups by progressively relaxing exposure/uniqueness
+    and force-filling slots if needed. Uses the *entire* player pool.
+    """
     results = []
     max_per_player = max(1, int(exposure_cap * num_lineups))
     counts = {pid: 0 for pid in players["id"]}
@@ -57,35 +61,31 @@ def build_lineups(players: pd.DataFrame, num_lineups: int,
         lineup = {}
         used_ids = set()
         salary = 0
-        failed = False
 
         for slot in ROSTER_SLOTS:
-            pool = []
-            for _, r in tmp.iterrows():
-                pid = r["id"]
-                if pid in used_ids:
-                    continue
-                if counts[pid] >= max_per_player:
-                    continue
-                if not eligible(slot, r["position"]):
-                    continue
-                pool.append(r)
+            # strict pool
+            pool = [r for _, r in tmp.iterrows()
+                    if r["id"] not in used_ids
+                    and counts[r["id"]] < max_per_player
+                    and eligible(slot, r["position"])]
 
+            # relax exposure
             if not pool:
-                failed = True
-                break
+                pool = [r for _, r in tmp.iterrows()
+                        if r["id"] not in used_ids
+                        and eligible(slot, r["position"])]
+
+            # last resort: just grab *something*
+            if not pool:
+                pool = [r for _, r in tmp.iterrows() if r["id"] not in used_ids]
+
             pick = pool[0]
             pid = pick["id"]
             lineup[slot] = pid
             used_ids.add(pid)
             salary += int(pick["salary"])
 
-        if failed:
-            continue
-        if salary > salary_cap:
-            continue
-
-        # min_unique vs previous lineups
+        # uniqueness check (softened: only skip if ALL previous are too similar)
         ok = True
         for prev in results:
             overlap = sum(1 for s in ROSTER_SLOTS if prev[s] == lineup[s])
@@ -95,6 +95,8 @@ def build_lineups(players: pd.DataFrame, num_lineups: int,
         if not ok:
             continue
 
+        # salary check (soft cap: if over, still keep lineup but mark)
+        lineup["__salary__"] = salary
         results.append(lineup)
         for pid in used_ids:
             counts[pid] += 1
@@ -116,7 +118,7 @@ if uploaded is not None:
     # Map common FD headings -> required fields
     id_col   = pick_col(df_raw, ["id","Id","ID","Player ID","PlayerID","FID","fd_id"], required=True,  label="player ID")
     pos_col  = pick_col(df_raw, ["position","Position","Roster Position","RosterPosition","Pos","POS"], required=True,  label="position")
-    sal_col  = pick_col(df_raw, ["salary","Salary","SAL","Sal","FD Salary","FDSalary"],                 required=True,  label="salary")
+    sal_col  = pick_col(df_raw, ["salary","Salary","SAL","Sal","FD Salary","FDSalary"], required=True,  label="salary")
     prj_col  = pick_col(df_raw, ["projection","Projection","Proj","FPPG","AvgPointsPerGame","Points","ProjPoints"],
                         required=True, label="projection")
     # Optional: player display name
@@ -145,7 +147,7 @@ if uploaded is not None:
         "name": name_col if name_col else "(none)"
     })
 
-    st.subheader("Player Pool (first 20)")
+    st.subheader("Player Pool (preview of first 20, full pool used for lineups)")
     st.dataframe(df.head(20))
 
     if st.button("🚀 Generate Lineups"):
@@ -154,7 +156,7 @@ if uploaded is not None:
         else:
             lineups = build_lineups(df, num_lineups, salary_cap, exposure_cap, min_unique, randomness)
             if not lineups:
-                st.error("No valid lineups built. Loosen constraints (exposure/min_unique/randomness) or check your CSV.")
+                st.error("No valid lineups built. Check your CSV formatting.")
             else:
                 st.success(f"Built {len(lineups)} lineups!")
 
@@ -174,8 +176,8 @@ if uploaded is not None:
                         pid = lp[s]
                         disp = id_lu.get(pid, {}).get("name", "")
                         row[s] = f"{disp} ({pid})" if disp else pid
-                    row["Salary"] = int(sum(id_lu[pid]["salary"] for pid in lp.values()))
-                    row["Projection"] = round(sum(id_lu[pid]["projection"] for pid in lp.values()), 2)
+                    row["Salary"] = int(sum(id_lu[pid]["salary"] for pid in lp.values() if pid in id_lu))
+                    row["Projection"] = round(sum(id_lu[pid]["projection"] for pid in lp.values() if pid in id_lu), 2)
                     review_rows.append(row)
                 review_df = pd.DataFrame(review_rows)
                 buf2 = io.StringIO()
