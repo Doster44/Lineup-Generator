@@ -94,7 +94,18 @@ if uploaded_file is not None:
 # Normalize position column
 pos_col = None
 for cand in ["position","Position","Pos","Roster Position","RosterPosition"]:
-    if cand in df.columns:
+   def pick_col(df, candidates, required=False, label=""):
+    for col in candidates:
+        if col in df.columns:
+            return col
+    if required:
+        raise KeyError(
+            f"Missing required column for {label}. "
+            f"Looked for: {', '.join(candidates)}. "
+            f"Check your CSV headers."
+        )
+    return None
+
         pos_col = cand
         break
 if pos_col is None:
