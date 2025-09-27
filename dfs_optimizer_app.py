@@ -105,7 +105,6 @@ for cand in ["position","Position","Pos","Roster Position","RosterPosition"]:
             f"Check your CSV headers."
         )
     return None
-
         pos_col = cand
         break
 if pos_col is None:
