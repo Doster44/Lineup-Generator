@@ -105,7 +105,7 @@ for cand in ["position","Position","Pos","Roster Position","RosterPosition"]:
             f"Check your CSV headers."
         )
     return None
-        pos_col = cand
+    pos_col = cand
         break
 if pos_col is None:
     st.error("Could not find a position column in your CSV. Please check file headers.")
