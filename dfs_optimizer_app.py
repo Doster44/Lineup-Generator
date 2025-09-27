@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import random
 
 st.set_page_config(page_title="NFL DFS Optimizer", layout="wide")
 
@@ -16,8 +17,7 @@ def pick_col(df: pd.DataFrame, candidates, required=False, label=""):
     if required:
         raise KeyError(
             f"Missing required column for {label}. "
-            f"Looked for: {', '.join(candidates)}. "
-            f"Check your CSV headers."
+            f"Looked for: {', '.join(candidates)}."
         )
     return None
 
@@ -25,59 +25,74 @@ def normalize_position(pos: str) -> str:
     if not isinstance(pos, str):
         return ""
     p = pos.upper().strip()
-    if p in ["QB"]: return "QB"
-    if p in ["RB"]: return "RB"
-    if p in ["WR"]: return "WR"
-    if p in ["TE"]: return "TE"
+    if p == "QB": return "QB"
+    if p == "RB": return "RB"
+    if p == "WR": return "WR"
+    if p == "TE": return "TE"
     if p in ["DEF","DST","D/ST"]: return "DEF"
     return p
+
+def eligible(slot, pos):
+    if slot == "QB": return pos == "QB"
+    if slot in ("RB1","RB2"): return pos == "RB"
+    if slot in ("WR1","WR2","WR3"): return pos == "WR"
+    if slot == "TE": return pos == "TE"
+    if slot == "DEF": return pos == "DEF"
+    if slot == "FLEX": return pos in ("RB","WR","TE")
+    return False
+
+def weighted_choice(pool, col="rand_proj"):
+    weights = pool[col].to_numpy()
+    if weights.sum() <= 0:
+        return pool.sample(1).iloc[0]
+    weights = weights / weights.sum()
+    return pool.sample(n=1, weights=weights).iloc[0]
 
 def build_lineups(players: pd.DataFrame, num_lineups: int,
                   salary_cap: int, exposure_cap: float,
                   min_unique: int, randomness: float):
     results = []
-    max_per_player = max(1, int(exposure_cap * num_lineups))
     counts = {pid: 0 for pid in players["id"]}
+    max_per_player = max(1, int(exposure_cap * num_lineups))
 
-    def eligible(slot, pos):
-        if slot == "QB": return pos == "QB"
-        if slot in ("RB1","RB2"): return pos == "RB"
-        if slot in ("WR1","WR2","WR3"): return pos == "WR"
-        if slot == "TE": return pos == "TE"
-        if slot == "DEF": return pos == "DEF"
-        if slot == "FLEX": return pos in ("RB","WR","TE")
-        return False
+    attempts = 0
+    while len(results) < num_lineups and attempts < num_lineups * 50:
+        attempts += 1
 
-    for _ in range(num_lineups):
         tmp = players.copy()
         tmp["rand_proj"] = tmp["projection"] * np.random.uniform(1 - randomness, 1 + randomness, len(tmp))
-        tmp.sort_values("rand_proj", ascending=False, inplace=True)
 
         lineup = {}
         used_ids = set()
         salary = 0
+        valid = True
 
         for slot in ROSTER_SLOTS:
-            pool = [r for _, r in tmp.iterrows()
-                    if r["id"] not in used_ids
-                    and counts[r["id"]] < max_per_player
-                    and eligible(slot, r["position"])]
+            pool = tmp[(tmp["id"].apply(lambda x: x not in used_ids))
+                       & (tmp["position"].apply(lambda p: eligible(slot, p)))]
 
-            if not pool:  # relax exposure
-                pool = [r for _, r in tmp.iterrows()
-                        if r["id"] not in used_ids
-                        and eligible(slot, r["position"])]
+            # enforce exposure cap first
+            pool = pool[pool["id"].apply(lambda pid: counts[pid] < max_per_player)]
+            if pool.empty:
+                # relax exposure
+                pool = tmp[(tmp["id"].apply(lambda x: x not in used_ids))
+                           & (tmp["position"].apply(lambda p: eligible(slot, p)))]
+            if pool.empty:
+                valid = False
+                break
 
-            if not pool:  # absolute fallback
-                pool = [r for _, r in tmp.iterrows() if r["id"] not in used_ids]
-
-            pick = pool[0]
-            pid = pick["id"]
-            lineup[slot] = pid
-            used_ids.add(pid)
+            pick = weighted_choice(pool, "rand_proj")
+            lineup[slot] = pick["id"]
+            used_ids.add(pick["id"])
             salary += int(pick["salary"])
+            if salary > salary_cap:
+                valid = False
+                break
 
-        # uniqueness check
+        if not valid or len(lineup) < len(ROSTER_SLOTS):
+            continue
+
+        # enforce uniqueness
         ok = True
         for prev in results:
             overlap = sum(1 for s in ROSTER_SLOTS if prev[s] == lineup[s])
@@ -87,7 +102,6 @@ def build_lineups(players: pd.DataFrame, num_lineups: int,
         if not ok:
             continue
 
-        lineup["__salary__"] = salary
         results.append(lineup)
         for pid in used_ids:
             counts[pid] += 1
@@ -102,22 +116,20 @@ num_lineups = st.sidebar.slider("Number of Lineups", 1, 150, 20)
 salary_cap = st.sidebar.number_input("Salary Cap", value=60000, step=500)
 exposure_cap = st.sidebar.slider("Max Exposure (fraction)", 0.1, 1.0, 0.4)
 min_unique = st.sidebar.slider("Min Unique Players", 0, 9, 3)
-randomness = st.sidebar.slider("Randomness", 0.0, 0.25, 0.08)
+randomness = st.sidebar.slider("Randomness", 0.0, 0.5, 0.15)
 
 if uploaded is not None:
     df_raw = pd.read_csv(uploaded)
 
-    # Map common FD headings -> required fields
     id_col   = pick_col(df_raw, ["id","Id","ID","Player ID","PlayerID","FID","fd_id"], required=True,  label="player ID")
     pos_col  = pick_col(df_raw, ["position","Position","Roster Position","RosterPosition","Pos","POS"], required=True,  label="position")
     sal_col  = pick_col(df_raw, ["salary","Salary","SAL","Sal","FD Salary","FDSalary"], required=True,  label="salary")
     prj_col  = pick_col(df_raw, ["projection","Projection","Proj","FPPG","AvgPointsPerGame","Points","ProjPoints"], required=True, label="projection")
-
-    # Optional: player display name
     name_col = pick_col(df_raw, ["name","Name","Player","Player Name","Nickname"], required=False)
+
     if not name_col:
         first = pick_col(df_raw, ["First Name","First","first_name","first"], required=False)
-        last  = pick_col(df_raw, ["Last Name","Last","last_name","last"],    required=False)
+        last  = pick_col(df_raw, ["Last Name","Last","last_name","last"], required=False)
         if first and last:
             df_raw["__tmp_name__"] = (df_raw[first].fillna("").astype(str) + " " +
                                       df_raw[last].fillna("").astype(str)).str.strip()
@@ -130,6 +142,7 @@ if uploaded is not None:
         "projection": pd.to_numeric(df_raw[prj_col], errors="coerce").fillna(0.0),
         "name": df_raw[name_col] if name_col else ""
     })
+
     df = df[df["position"].isin(["QB","RB","WR","TE","DEF"]) & (df["salary"] > 0) & (df["projection"] > 0)]
 
     st.subheader("Detected columns")
@@ -138,27 +151,27 @@ if uploaded is not None:
         "name": name_col if name_col else "(none)"
     })
 
-    st.subheader("Player Pool (preview only — full pool used)")
-    st.dataframe(df.head(20))
+    st.subheader("Player Pool Preview")
+    st.dataframe(df.sample(min(20, len(df))))  # random 20 preview, full pool used
 
     if st.button("🚀 Generate Lineups"):
         if df.empty:
-            st.error("No valid players after parsing. Check your CSV formatting.")
+            st.error("No valid players found. Check CSV.")
         else:
             lineups = build_lineups(df, num_lineups, salary_cap, exposure_cap, min_unique, randomness)
             if not lineups:
-                st.error("No valid lineups built. Loosen constraints or check your CSV.")
+                st.error("Could not build lineups. Try lowering constraints.")
             else:
                 st.success(f"Built {len(lineups)} lineups!")
 
-                # FanDuel upload CSV (IDs only)
+                # Upload CSV = IDs only
                 upload_df = pd.DataFrame(lineups)[ROSTER_SLOTS]
                 buf1 = io.StringIO()
                 upload_df.to_csv(buf1, index=False)
                 st.download_button("⬇️ Download FanDuel Upload CSV", buf1.getvalue(),
                                    file_name="lineups_upload.csv", mime="text/csv")
 
-                # Review CSV (names + IDs + salary + projection)
+                # Review CSV = names + IDs
                 id_lu = df.set_index("id").to_dict(orient="index")
                 review_rows = []
                 for lp in lineups:
