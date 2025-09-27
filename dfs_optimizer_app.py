@@ -91,7 +91,17 @@ if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
     if "id" not in df.columns:
         df = df.rename(columns={df.columns[0]:"id"})
-    df["position"] = df["position"].apply(normalize_position)
+# Normalize position column
+pos_col = None
+for cand in ["position","Position","Pos","Roster Position","RosterPosition"]:
+    if cand in df.columns:
+        pos_col = cand
+        break
+if pos_col is None:
+    st.error("Could not find a position column in your CSV. Please check file headers.")
+else:
+    df["position"] = df[pos_col].apply(normalize_position)
+
     df["salary"] = pd.to_numeric(df["salary"], errors="coerce").fillna(0).astype(int)
     df["projection"] = pd.to_numeric(df["projection"], errors="coerce").fillna(0.0)
 
